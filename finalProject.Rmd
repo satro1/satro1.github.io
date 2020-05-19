@@ -1,0 +1,420 @@
+---
+title: "cmsc320final"
+author: "Govind Nair"
+date: "5/16/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rvest)
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(ggplot2)
+library(broom)
+library(tree)
+library(randomForest)
+library(cvTools)
+```
+
+In this tutorial, we will be analyzing data on the number of cases and deaths
+due to COVID-19 across different countries in the world using concepts
+in data science.
+
+From differential equations, we know that populations grow according to a logistic
+model: exponentially increasing initially, and then plateauing towards a certain
+limit. COVID-19 can be thought of as a population of viruses that grow in the same
+manner. Our task is to see whether COVID-19 does in fact follow the logistic curve,
+what factors go into infection rate and death rate, and to see what predictions we
+can make from the information we have.
+
+For more on logistic curves: 
+https://study.com/academy/lesson/logistic-population-growth-equation-definition-graph.html
+
+The first step in our analysis is to gather some data that can be used for the task.
+
+```{r gather}
+covid_df <- read.csv("owid-covid-data.csv")
+head(covid_df %>% sample_frac(0.1))
+```
+The data table above is downloaded from https://ourworldindata.org/. A small sample of the full data set 
+is shown above. The full data set has 17635 entities (or rows), each with 29 attributes (or columns). 
+In our experiment, entities can be thought of as observations, and attributes are the characteristics of each entity.
+Each entity can be uniquely identified by its iso_code and date, therefore, in our experiment, the pair
+(iso_code, date) is called a superkey. Since our superkey is minimal (has the fewest possible number of attributes),
+it is also a candidate key. Since we will use this key to uniquely identify entities, our candidate key is also
+a primary key.
+
+Data is not always organized nicely. When gathering data off of websites, CSS selectors can be used to
+select html nodes and tables off of websites and organize the data in to a data table. A data table organized
+as entities with attributes is called a data frame.
+
+Often, data frames are not "tidy" either, meaning the data frame does not properly organize entities and 
+attributes. This has to be manually organized in order to properly analyze the data.
+
+Sometimes, missing data in data frames are not encoded correctly as NA, this too has to be corrected
+manually by changing all incorrectly encoded missing data as NA.
+
+Sometimes data from two or more sources are used to perform analysis. In this case, some entities are repeated
+across data sets with slightly different attributes. We can combine such entities into one using a similiarity
+function. A similarity function takes as input attributes of two entities and outputs a scalar indicating
+how similar these entities are. If two entities have a large enough similarity, they can be considered to be
+the same entity. Similarly, we can also define a dissimilarity function which tells us how dissimilar two
+entities are. If two entities have a small enough dissimilarity, they can be considered to be the same entity.
+
+Attributes in a data frame might also not have the correct type, for example, an integer might be represented
+as a string. To make analysis easier, we change the incorrect types in to desired types. In our experiment,
+we will change the type of iso_code and location from factors to characters, and date from factor to dates.
+We will also remove attributes from our data frame which we do not intend on using for our analysis or can
+be recovered using other attributes.
+
+For more on data types:
+https://en.wikipedia.org/wiki/Data_type
+
+```{r changeTypes}
+covid_df$iso_code <- as.character(covid_df$iso_code)
+covid_df$location <- as.character(covid_df$location)
+covid_df$date <- as.Date(covid_df$date)
+covid_df <- covid_df %>%
+  subset(select = c(iso_code, location, date, total_cases, total_deaths, population, median_age,
+                    gdp_per_capita, diabetes_prevalence, female_smokers, male_smokers, handwashing_facilities))
+
+head(covid_df %>% sample_frac(0.1))
+```
+We changed the types of columns iso_code, location, and date from factors to characters, characters, and dates
+respectively. Now our data frame is ready to analyze. Note: The two data frames shown appear not to have the same
+entities; this is because only a small RANDOM sample of the entire data frame is shown in each.
+
+We also extracted a subset of attributes that we plan on using, namely: iso_code, location, date, total_cases, 
+total_deaths, population, median_age, gdp_per_capita, diabetes_prevalence, female_smokers, male_smokers,
+and handwashing_facilities. Now we have the same number of entities, but only 12 attributes.
+
+Now we perform some exploratory data analysis (EDA). This is the final step before we start modeling using
+statistics and/or machine learning.
+
+EDA is simply a way of better understanding the data at hand, often this can be done through visualization.
+As an initial step, let's take a look at how the total number of COVID-19 cases changes over time.
+
+For more on EDA: https://en.wikipedia.org/wiki/Exploratory_data_analysis
+
+```{r casesVtime}
+covid_df %>%
+  ggplot(mapping = aes(x = date, y = total_cases)) +
+  geom_point()
+```
+Here we see three drastically different trends in our data, analogous to three separate functions of time.
+Let's see if the total deaths also follow similar trends.
+
+```{r deathsVtime}
+covid_df %>%
+  ggplot(mapping = aes(x = date, y = total_deaths)) +
+  geom_point()
+```
+The data appears similar, so let's map both total cases and deaths over time, encoding deaths as the color
+of each point.
+
+Hypothesizing that the population of the virus grows according to a logistic curve, so far it appears as if
+the population has not hit its inflection point and started plateauing yet, it is still hypothesized to be
+growing exponentially. Therefore, we will plot the log of total cases and see if it appears to be linear.
+
+```{r casesANDdeathsVtime}
+covid_df %>%
+  ggplot(mapping = aes(x = date, y = log(total_cases), color = total_deaths)) +
+  geom_point() +
+  geom_smooth(method = lm)
+```
+The model appears to be far from linear, so it is safe to assume that the virus' population is not growing
+according to a logistic model.
+
+Now we hypothesize that total cases and deaths follow a similar trend, lets see if we can visualize this
+by plotting total deaths vs total cases. We expect a linear model. Additionally
+
+```{r deathsVcases}
+covid_df %>%
+  ggplot(aes(x = total_cases, y = total_deaths)) +
+  geom_point() +
+  geom_smooth(method = lm)
+```
+Now, since we see a cluster on the bottom left corner of our plot, and only few data points as total cases
+increases, we want the data to uniformly take up space on our plot, meaning we want to spread the data out
+evenly. Lets try taking the log of both variables and see if we can spread out the data points more evenly.
+
+```{r LOGdeathsVLOGcases}
+covid_df %>%
+  ggplot(aes(x = log(total_cases), y = log(total_deaths))) +
+  geom_point() +
+  geom_smooth(method = lm)
+```
+Here we plot the log of both axes, which brings larger values closer to smaller values. We do appear to have
+a large cluster still, but it separates most of the data points from points that appear to be outliers.
+This plot however ommits entities that have 0 total deaths and/or 0 total cases since log(0) is negative
+infinity, so we are missing a large chunk of data on this plot, around 8000 entities are ommitted.
+
+It appears as if total cases and deaths do follow a similar trend, so total cases can be used to predict 
+total deaths. Using statistics, we can check to see if there is a statistically significant linear relationship
+between total cases and deaths.
+
+```{r casesVdeathsRelationship}
+casesVdeaths <- lm(total_deaths ~ total_cases, data = covid_df)
+casesVdeathsStats <- tidy(casesVdeaths)
+casesVdeathsStats
+```
+Since the p value for the slope of total cases is less than 0.01 (we will use alpha = 0.01), it is safe to
+say that there is a linear relationship between total cases and deaths. Therefore, we will focus on cases
+and we can predict deaths using this model if needed.
+
+What we just did was hypothesis testing. What the table above says is: Assuming there is no linear relationship
+between total cases and deaths (coefficient of total cases in total deaths = 0.068731 * total cases - 34.302301 is
+actually 0), there is a 0.000000000 probability that we get the graph above.
+Note: A statistically significant relationship between two variables implies a statistically significant relationship
+between the log of both the variables since the exponential of the log of both the variables gives back the
+original equation.
+Note: A linear model can be a function of multiple predictor variables each with their own slope which may or may not
+be statistically significant.
+
+For more on hypothesis testing: https://www.statisticshowto.com/probability-and-statistics/hypothesis-testing/
+
+Let's continue with some more EDA and compute some summary statistics of our data to get a better idea of how it is
+distributed.
+
+```{r summaryStats}
+covid_df %>%
+  summarize(min_cases = min(total_cases), max_cases = max(total_cases),
+            mean_cases = mean(total_cases), median_cases = median(total_cases))
+```
+Since the mean of the number of cases is much larger than the median, we know that the total number of cases
+is skewed to the right with the majority of values on the left and with a few values on the right.
+
+Lets see if we can visualize this. Since the data is skewed to the right, we will use a logarithmic scale
+to better show the distribution of total cases.
+
+```{r casesHistogram}
+covid_df %>%
+  ggplot(aes(x = log(total_cases))) + 
+  geom_histogram(bins = 15)
+```
+The histogram shows what we expected, the data is skewed to the right with majority of data points on the left.
+
+Now lets see if any other variables, such as gdp, median age, and hand washing facilities, can be predicted using 
+total cases. Just like we did with total deaths, we will create three plots, and then see if each of them is a
+statistically significant linear model.
+
+```{r gdpVcases}
+covid_df %>%
+  ggplot(aes(x = total_cases, y = gdp_per_capita)) +
+  geom_point() +
+  geom_smooth(method = lm)
+```
+There does not appear to be a linear relationship between gdp and total cases. Let's quantify this statement.
+
+```{r gdpVcasesRelationship}
+gdpVcases <- lm(gdp_per_capita ~ total_cases, data = covid_df)
+tidy(gdpVcases)
+```
+
+Since p value = 0.04108769 > alpha = 0.01, there is no significant relationship between gdp and total cases.
+
+```{r ageVcases}
+covid_df %>%
+  ggplot(aes(x = total_cases, y = median_age)) +
+  geom_point() +
+  geom_smooth(method = lm)
+```
+There doesn't appear to be a linear relationship between total cases and median age.
+```{r ageVcasesRelationship}
+ageVcases <- lm(median_age ~ total_cases, data = covid_df)
+tidy(ageVcases)
+```
+However, there is a statistically significant linear relationship between median age and total cases.
+This discrepancy between what we expect from the plot and what hypothesis testing tells us could be a fault
+of the model we are using.
+
+```{r handwashingVcases}
+covid_df %>%
+  ggplot(aes(x = total_cases, y = handwashing_facilities)) +
+  geom_point() +
+  geom_smooth(method = lm)
+```
+There doesn't appear to be a linear relationship between total cases and handwashing facilities.
+```{r handwashingVcasesRelationship}
+handwashingVcases <- lm(handwashing_facilities ~ total_cases, data = covid_df)
+tidy(handwashingVcases)
+```
+Since p value = 0.3051465 > alpha = 0.01, there is no statistically significant linear relationship between 
+total cases and handwashing facilities.
+
+Now we will see if we can predict the total cases for future dates using the data we have. We will compare 
+four different models: linear model, logistic model, decision tree model, and random forest model using 
+10 fold cross validation, and use the best model to predict the growth of the virus population for future dates.
+
+A linear model will be of the form y = ax + b, where y is the variable we are trying to predict, x is the variable
+we are using to predict y, and a and b are constants.
+
+For more on linear regression: http://www.stat.yale.edu/Courses/1997-98/101/linreg.htm
+
+A logistic model is is a linear model predicting the log of the odds of an event, where the odds of an event is
+the probability that the ratio of the probability of an event and the probability of the event's complement.
+
+For more on logistic regression: https://towardsdatascience.com/logistic-regression-detailed-overview-46c4da4303bc
+
+A decision tree model can be thought of as a binary tree with predicates at each non-terminal node and predictions
+at each leaf node. At each non terminal node, depending of whether the predicate at the node is true or false, we pick either
+the left or right child node to visit next and continue until we reach a leaf node prediction.
+
+For more on binary trees: https://en.wikipedia.org/wiki/Binary_tree
+For more on decision trees: https://en.wikipedia.org/wiki/Decision_tree
+
+A random forest model is a collection of decision trees, each made using a random sample (with replacement) of the 
+data at hand. The resulting prediction is the mean of the predictions from all the decision trees in the 
+random forest.
+
+For more on random forests: https://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm
+
+Since we are predicting for future dates, this is the only predictor variable we will be using.
+
+```{r models}
+linear <- lm(total_cases ~ date, data = covid_df)
+logistic <- glm(total_cases ~ date, data = covid_df)
+treeM <- tree(total_cases ~ date, data = covid_df)
+rf <- randomForest(total_cases ~ date, data = covid_df)
+```
+Having our four models defined, lets use 10 fold cross validation to see which model performs best at predicting.
+k-fold cross validation is done by splitting the data into k subsets, and then for each of the subsets we build
+a model using the other k-1 subsets, and then we see how good the model does at predicting the excluded subset.
+In our case, we use k = 10.
+
+For more on k-fold cross validation: https://machinelearningmastery.com/k-fold-cross-validation/
+
+```{r MSE}
+get_error <- function(training_set, validation_set, model){
+  if (model=="tree"){
+    model <- tree(total_cases~date, data=covid_df)
+  }
+  else if (model=="linear"){
+    model <- lm(total_cases~date, data=covid_df)
+  }
+  else if (model=="logistic"){
+    model <- glm(total_cases~date, data=covid_df)
+  }
+  else{
+    model <- randomForest(total_cases~date, data=covid_df)
+  }
+  empty_validation_set <- validation_set %>%
+    mutate(total_cases=NA)
+  preds <- predict(model, empty_validation_set)
+  
+  mse <- (sum(preds - validation_set$total_cases))^2 / nrow(validation_set)
+  return(mse)
+}
+
+errs <- data.frame(method=NA, err=NA)
+
+k <- 10
+fold_indices <- cvFolds(n=nrow(covid_df), K=k)
+
+for(i in 1:k){
+  validate_indices <- which(fold_indices$which==i)
+  training_set <- covid_df[-validate_indices,]
+  validation_set <- covid_df[validate_indices,]
+  
+  tree_err <- get_error(training_set, validation_set, "tree")
+  forest_err <- get_error(training_set, validation_set, "randomForest")
+  linear_err <- get_error(training_set, validation_set, "linear")
+  logistic_err <- get_error(training_set, validation_set, "logisitic")
+  df <- data.frame(method="tree", err=tree_err) %>%
+    rbind(data.frame(method="forest", err=forest_err)) %>%
+    rbind(data.frame(method="linear", err=linear_err)) %>%
+    rbind(data.frame(method="logistic", err=logistic_err))
+  errs <- errs %>%
+    rbind(df)
+}
+
+dotplot(err~method, data=errs, ylab="Mean prediction error")
+```
+Here we calculate how well a model does by calculating the mean squared error (MSE) of the predictions when
+using each model, the mean of (prediction - actual value)^2. Plotting the MSEs for each of the 10 subsets
+for each of the model shows us that all models appear to perform equally well, therefore, we will use the
+model with the smallest mean MSE.
+
+```{r minMSE}
+linearErrs <- errs %>%
+  filter(method=="linear")
+logErrs <- errs %>%
+  filter(method=="logistic")
+treeErrs <- errs %>%
+  filter(method=="tree")
+rfErrs <- errs %>%
+  filter(method=="forest")
+df <- data.frame(linear=mean(linearErrs$err), logistic=mean(logErrs$err), tree=mean(treeErrs$err), rf=mean(rfErrs$err))
+df
+```
+The data table shows that the mean MSE for each model, we will use the model with the 
+least mean MSE to predict for the future.
+Note: Mean MSE will be different each time we perform this experiment due to the randomness
+in k-fold cross validation, therefore the model with the least mean MSE will be different
+in each experiment.
+
+Our data set contains data from December 31 2019 to May 16 2020, we will predict the total cases for all days
+for the rest of the year 2020.
+
+```{r predict}
+model <- NA
+if(df[1, "linear"] < df[1, "logistic"] & df[1, "linear"] < df[1, "tree"] & df[1, "linear"] < df[1, "rf"]){
+  model <- linear
+}else if(df[1, "logistic"] < df[1, "linear"] & df[1, "logistic"] < df[1, "tree"] & df[1, "logistic"] < df[1, "rf"]){
+  model <- logistic
+}else if(df[1, "tree"] < df[1, "linear"] & df[1, "tree"] < df[1, "logistic"] & df[1, "tree"] < df[1, "rf"]){
+  model <- tree
+}else{
+  model <- rf
+}
+dates <- seq(as.Date("2020-5-17"), as.Date("2020-12-31"), by = "days")
+
+to_predict <- data.frame(date = dates, total_cases = NA)
+
+predictions <- predict(model, to_predict)
+head(predictions)
+```
+These are the predictions for the total number of cases for some of the days we want to predict.
+Let's combine this data with our original data and plot it to get a visual sense of how well we have
+predicted the data.
+
+```{r combineNplot}
+predicted_df <- to_predict %>%
+  mutate(total_cases = predictions, iso_code = NA, location = NA, total_deaths = NA, population = NA,
+         median_age = NA, gdp_per_capita = NA, diabetes_prevalence = NA, female_smokers = NA,
+         male_smokers = NA, handwashing_facilities = NA)
+
+new_df <- covid_df %>%
+  rbind(predicted_df)
+
+new_df %>%
+  ggplot(aes(x = date, y = total_cases)) +
+  geom_point()
+```
+Our predictions follow one of the three trends we initially saw in our data set, so it seems to be an
+acceptable set of predictions. We might have expected the data to follow one of the other two trends, 
+but since the density of points is highest on the trend where total cases are the least, these data points
+influence our trained model more than the other two trends.
+
+Let's isolate the trend with the greatest density and see whether this curve specifically does follow a
+logistic curve as initially hypothesized.
+
+```{r isolateTrend}
+new_df <- new_df %>%
+  filter(total_cases < 0.3 * 10^6)
+
+new_df %>%
+  ggplot(aes(x = date, y = total_cases)) +
+  geom_point()
+```
+
+There appears to be multiple logistic curves in the isolated trend from the original data with the highest
+density of points.
+
+Our analysis shows that the total number of cases of corona virus, at large, does follow a logistic curve.
+Therefore, we can rest assured that the total population of the virus will eventually plateau and possibly
+even decline as vaccinations and medications are developed to combat the spread of the virus. The decline 
+is not evident from our analysis however since we have no data that does show a decline in the total cases,
+at present, the cases are only increasing towards a certain limit.
